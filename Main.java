@@ -19,8 +19,12 @@ public class Main extends JFrame {
     public static Map<Integer, Map<String, ModuleState<?>>> instanceModules = new HashMap<>();
     private List<MemuInstance> instances = new ArrayList<>();
     private javax.swing.Timer statusTimer;
+    private JButton optimizeAllButton;
 
     public Main() {
+        // Initialize BotUtils
+        BotUtils.init();
+        
         configureWindow();
         initializeUI();
         loadSettings();
@@ -56,6 +60,12 @@ public class Main extends JFrame {
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
         topPanel.add(createButton("Refresh", e -> refreshInstances()));
         topPanel.add(createButton("Create", e -> createInstance()));
+        
+        // Add the Optimize All button
+        optimizeAllButton = createButton("Optimize All", e -> optimizeAllInstances());
+        optimizeAllButton.setBackground(new Color(34, 139, 34)); // Green background
+        optimizeAllButton.setToolTipText("Optimize all stopped instances to 400x652 resolution");
+        topPanel.add(optimizeAllButton);
 
         add(topPanel, BorderLayout.NORTH);
         add(new JScrollPane(instancesTable), BorderLayout.CENTER);
@@ -80,6 +90,218 @@ public class Main extends JFrame {
         btn.setFont(new Font("Segoe UI", Font.BOLD, 14));
         btn.addActionListener(action);
         return btn;
+    }
+
+    private void optimizeAllInstances() {
+        // Get all stopped instances
+        List<MemuInstance> stoppedInstances = instances.stream()
+            .filter(inst -> "Stopped".equals(inst.status))
+            .collect(java.util.stream.Collectors.toList());
+        
+        if (stoppedInstances.isEmpty()) {
+            JOptionPane.showMessageDialog(this, 
+                "No stopped instances found to optimize.\nOnly stopped instances can be optimized.", 
+                "No Instances to Optimize", 
+                JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        
+        // Confirm with user
+        int result = JOptionPane.showConfirmDialog(this,
+            "This will optimize " + stoppedInstances.size() + " stopped instance(s) to 400x652 resolution.\n" +
+            "This process may take several minutes.\n\nContinue?",
+            "Optimize All Instances",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.QUESTION_MESSAGE);
+        
+        if (result != JOptionPane.YES_OPTION) {
+            return;
+        }
+        
+        // Disable the button during optimization
+        optimizeAllButton.setEnabled(false);
+        optimizeAllButton.setText("Optimizing...");
+        
+        // Start the optimization process
+        SwingWorker<Void, String> worker = new SwingWorker<Void, String>() {
+            private int currentInstance = 0;
+            private int totalInstances = stoppedInstances.size();
+            private int successCount = 0;
+            private int failureCount = 0;
+            
+            @Override
+            protected Void doInBackground() throws Exception {
+                publish("🚀 Starting batch optimization of " + totalInstances + " instances...");
+                
+                for (MemuInstance instance : stoppedInstances) {
+                    currentInstance++;
+                    publish("📋 Processing instance " + currentInstance + "/" + totalInstances + 
+                           " (Index: " + instance.index + ", Name: " + instance.name + ")");
+                    
+                    // Update instance state in UI
+                    SwingUtilities.invokeLater(() -> {
+                        instance.setState("Optimizing (" + currentInstance + "/" + totalInstances + ")...");
+                        refreshInstanceInTable(instance);
+                    });
+                    
+                    boolean success = optimizeSingleInstance(instance.index);
+                    
+                    if (success) {
+                        successCount++;
+                        publish("✅ Instance " + instance.index + " optimized successfully");
+                        SwingUtilities.invokeLater(() -> {
+                            instance.setState("Optimized ✅");
+                            refreshInstanceInTable(instance);
+                        });
+                    } else {
+                        failureCount++;
+                        publish("❌ Instance " + instance.index + " optimization failed");
+                        SwingUtilities.invokeLater(() -> {
+                            instance.setState("Optimization failed ❌");
+                            refreshInstanceInTable(instance);
+                        });
+                    }
+                    
+                    // Small delay between instances
+                    Thread.sleep(1000);
+                }
+                
+                return null;
+            }
+            
+            @Override
+            protected void process(List<String> chunks) {
+                for (String message : chunks) {
+                    System.out.println(message);
+                }
+            }
+            
+            @Override
+            protected void done() {
+                // Re-enable the button
+                optimizeAllButton.setEnabled(true);
+                optimizeAllButton.setText("Optimize All");
+                
+                // Show summary
+                String summary = String.format(
+                    "Batch optimization completed!\n\n" +
+                    "✅ Successful: %d\n" +
+                    "❌ Failed: %d\n" +
+                    "📊 Total: %d",
+                    successCount, failureCount, totalInstances
+                );
+                
+                System.out.println("🎉 " + summary.replace("\n", " "));
+                
+                JOptionPane.showMessageDialog(Main.this, summary, 
+                    "Optimization Complete", 
+                    JOptionPane.INFORMATION_MESSAGE);
+                
+                // Refresh the table
+                refreshInstances();
+            }
+        };
+        
+        worker.execute();
+    }
+    
+    private boolean optimizeSingleInstance(int index) {
+        try {
+            System.out.println("🔧 Optimizing instance " + index + "...");
+            
+            // Step 1: Ensure instance is stopped
+            ProcessBuilder stopBuilder = new ProcessBuilder(MEMUC_PATH, "stop", "-i", String.valueOf(index));
+            Process stopProcess = stopBuilder.start();
+            boolean stopSuccess = stopProcess.waitFor(15, TimeUnit.SECONDS);
+            
+            if (!stopSuccess) {
+                System.err.println("❌ Failed to stop instance " + index);
+                return false;
+            }
+            
+            Thread.sleep(3000); // Wait for complete shutdown
+            
+            // Step 2: Modify resolution
+            ProcessBuilder modifyBuilder = new ProcessBuilder(
+                MEMUC_PATH, "modify", "-i", String.valueOf(index),
+                "-resolution", "400x652", "-dpi", "133"
+            );
+            
+            Process modifyProcess = modifyBuilder.start();
+            boolean modifySuccess = modifyProcess.waitFor(30, TimeUnit.SECONDS) && 
+                                  modifyProcess.exitValue() == 0;
+            
+            if (!modifySuccess) {
+                System.err.println("❌ Resolution modification failed for instance " + index);
+                return false;
+            }
+            
+            Thread.sleep(2000);
+            
+            // Step 3: Start instance to verify
+            ProcessBuilder startBuilder = new ProcessBuilder(MEMUC_PATH, "start", "-i", String.valueOf(index));
+            Process startProcess = startBuilder.start();
+            boolean startSuccess = startProcess.waitFor(20, TimeUnit.SECONDS) && 
+                                 startProcess.exitValue() == 0;
+            
+            if (!startSuccess) {
+                System.err.println("❌ Failed to start instance " + index + " for verification");
+                return false;
+            }
+            
+            Thread.sleep(15000); // Wait for full boot
+            
+            // Step 4: Verify resolution
+            String testPath = "screenshots/optimize_verify_" + index + ".png";
+            BotUtils.createDirectoryIfNeeded("screenshots");
+            
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                if (BotUtils.takeMenuScreenshotLegacy(index, testPath)) {
+                    File testFile = new File(testPath);
+                    if (testFile.exists() && BotUtils.openCvLoaded) {
+                        org.opencv.core.Mat testMat = org.opencv.imgcodecs.Imgcodecs.imread(testPath, org.opencv.imgcodecs.Imgcodecs.IMREAD_GRAYSCALE);
+                        if (!testMat.empty()) {
+                            int width = testMat.cols();
+                            int height = testMat.rows();
+                            testMat.release();
+                            
+                            if (width == 400 && height == 652) {
+                                System.out.println("✅ Instance " + index + " resolution verified: 400x652");
+                                
+                                // Stop the instance after verification
+                                ProcessBuilder stopAfterBuilder = new ProcessBuilder(MEMUC_PATH, "stop", "-i", String.valueOf(index));
+                                stopAfterBuilder.start();
+                                
+                                return true;
+                            } else {
+                                System.err.println("❌ Wrong resolution for instance " + index + ": " + width + "x" + height);
+                            }
+                        }
+                    }
+                }
+                
+                if (attempt < 3) {
+                    Thread.sleep(3000);
+                }
+            }
+            
+            return false;
+            
+        } catch (Exception e) {
+            System.err.println("❌ Exception optimizing instance " + index + ": " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private void refreshInstanceInTable(MemuInstance instance) {
+        for (int i = 0; i < instances.size(); i++) {
+            if (instances.get(i).index == instance.index) {
+                if (i < tableModel.getRowCount()) {
+                    tableModel.setValueAt(instance.status, i, 2); // Status column
+                }
+                break;
+            }
+        }
     }
 
     public MemuInstance createInstance() {
@@ -179,44 +401,8 @@ public class Main extends JFrame {
     public void startInstance(int index) {
         MemuActions.startInstance(this, index, () -> {
             refreshInstances();
-            // Automatically optimize first, then start AutoStart after optimization
-            optimizeInstanceInBackground(index);
-        });
-    }
-    
-    private void optimizeInstanceInBackground(int index) {
-        // Check if optimization is already running for this instance
-        MemuInstance inst = getInstanceByIndex(index);
-        if (inst != null && inst.state.contains("optimizing")) {
-            System.out.println("Optimization already in progress for instance " + index);
-            return;
-        }
-        
-        // Run optimization first, then start instance
-        if (inst != null) {
-            inst.setState("Optimizing before start...");
-        }
-        
-        MemuActions.optimizeInstanceInBackground(index, () -> {
-            if (inst != null) {
-                inst.setState("Optimized - Starting...");
-            }
-            // After optimization, start the instance
-            MemuActions.startInstance(this, index, () -> {
-                refreshInstances();
-                // Wait a moment then enable AutoStart if configured
-                new Thread(() -> {
-                    try {
-                        Thread.sleep(5000); // Give instance time to fully boot
-                        SwingUtilities.invokeLater(() -> {
-                            enableAutoStartIfConfigured(index);
-                            refreshInstances();
-                        });
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }).start();
-            });
+            // Remove the auto-optimization on start since we now have the optimize button
+            enableAutoStartIfConfigured(index);
         });
     }
 

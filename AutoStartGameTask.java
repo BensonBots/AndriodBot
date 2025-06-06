@@ -2,6 +2,7 @@ package newgame;
 
 import java.awt.Point;
 import java.nio.file.Paths;
+import java.io.File;
 
 public class AutoStartGameTask {
     private final MemuInstance instance;
@@ -31,20 +32,76 @@ public class AutoStartGameTask {
         
         Thread gameThread = new Thread(() -> {
             try {
-                String screenPath = Paths.get(BotUtils.SCREENSHOTS_DIR, "current_screen_" + instance.index + ".png").toString();
+                // Use the EXACT SAME path that works perfectly for resolution checks
+                String screenPath = Paths.get(BotUtils.SCREENSHOTS_DIR, "resolution_check_" + instance.index + ".png").toString();
                 
                 BotUtils.createDirectoryIfNeeded(BotUtils.SCREENSHOTS_DIR);
                 
                 for (int i = 0; i < attempts && !shouldStop && !Thread.currentThread().isInterrupted(); i++) {
                     System.out.println("Game start attempt " + (i+1) + "/" + attempts + " for instance " + instance.index);
                     
-                    if (!BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
-                        instance.setState("[ERROR] Screenshot failed (" + (i+1) + "/" + attempts + ")");
-                        if (!BotUtils.delay(2000)) break;
+                    // Try to get a good screenshot - use same method that works for resolution check
+                    boolean screenshotSuccess = false;
+                    for (int retry = 0; retry < 5; retry++) { // Increased retries
+                        System.out.println("Screenshot attempt " + (retry + 1) + "/5 for game start...");
+                        System.out.println("Using working screenshot path: " + screenPath);
+                        
+                        // Delete existing file to get fresh screenshot
+                        File existingFile = new File(screenPath);
+                        if (existingFile.exists()) {
+                            existingFile.delete();
+                            System.out.println("Deleted existing resolution_check file");
+                            try {
+                                Thread.sleep(500); // Give file system time
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                        
+                        if (BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
+                            File screenFile = new File(screenPath);
+                            if (screenFile.exists() && screenFile.length() > 15000) {
+                                screenshotSuccess = true;
+                                System.out.println("✅ Screenshot successful: " + screenFile.length() + " bytes (using resolution_check path)");
+                                break;
+                            } else {
+                                System.err.println("❌ Screenshot too small (" + 
+                                    (screenFile.exists() ? screenFile.length() + " bytes" : "doesn't exist") + 
+                                    "), retrying...");
+                                
+                                // Wait longer between retries
+                                BotUtils.delay(2000);
+                            }
+                        } else {
+                            System.err.println("❌ Screenshot command failed, retrying...");
+                            BotUtils.delay(2000);
+                        }
+                    }
+                    
+                    if (!screenshotSuccess) {
+                        instance.setState("[ERROR] Screenshot failed after 5 retries (" + (i+1) + "/" + attempts + ")");
+                        System.err.println("All screenshot attempts failed, skipping this game start attempt");
+                        if (!BotUtils.delay(5000)) break; // Wait longer before next attempt
                         continue;
                     }
                     
-                    Point gameIcon = BotUtils.findImageOnScreenGray(screenPath, "game_icon.png", 0.8);
+                    // Verify screenshot can be loaded by OpenCV before proceeding
+                    if (BotUtils.isOpenCvLoaded()) {
+                        org.opencv.core.Mat testMat = org.opencv.imgcodecs.Imgcodecs.imread(screenPath);
+                        if (testMat.empty()) {
+                            System.err.println("❌ OpenCV cannot load screenshot, retrying...");
+                            testMat.release();
+                            if (!BotUtils.delay(2000)) break;
+                            continue;
+                        } else {
+                            System.out.println("✅ OpenCV validated screenshot: " + testMat.cols() + "x" + testMat.rows());
+                            testMat.release();
+                        }
+                    }
+                    
+                    // Use the new method with retry capability
+                    Point gameIcon = BotUtils.findImageOnScreenGrayWithRetry(screenPath, "game_icon.png", 0.8, instance.index);
                     if (gameIcon != null) {
                         instance.setState("Game already running");
                         System.out.println("Game already detected running for instance " + instance.index);
@@ -53,16 +110,24 @@ public class AutoStartGameTask {
                     
                     boolean closedPopup = false;
                     for (String closeBtn : new String[]{"close_x.png", "close_x2.png", "close_x3.png"}) {
-                        Point closeBtnLoc = BotUtils.findImageOnScreenGray(screenPath, closeBtn, 0.8);
+                        Point closeBtnLoc = BotUtils.findImageOnScreenGrayWithRetry(screenPath, closeBtn, 0.8, instance.index);
                         if (closeBtnLoc != null) {
                             if (BotUtils.clickMenu(instance.index, closeBtnLoc)) {
                                 instance.setState("Closed popup (" + (i+1) + "/" + attempts + ")");
                                 System.out.println("Closed popup for instance " + instance.index);
                                 closedPopup = true;
                                 if (!BotUtils.delay(1000)) break;
-                                if (!BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
-                                    instance.setState("[ERROR] Screenshot failed after popup");
-                                    break;
+                                
+                                // Retake screenshot after closing popup with same robust logic
+                                for (int popupRetry = 0; popupRetry < 3; popupRetry++) {
+                                    if (BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
+                                        File screenFile = new File(screenPath);
+                                        if (screenFile.exists() && screenFile.length() > 15000) {
+                                            System.out.println("✅ Post-popup screenshot: " + screenFile.length() + " bytes");
+                                            break;
+                                        }
+                                    }
+                                    BotUtils.delay(1000);
                                 }
                                 break;
                             }
@@ -74,7 +139,7 @@ public class AutoStartGameTask {
                         continue;
                     }
                     
-                    Point launcher = BotUtils.findImageOnScreenGray(screenPath, "game_launcher.png", 0.8);
+                    Point launcher = BotUtils.findImageOnScreenGrayWithRetry(screenPath, "game_launcher.png", 0.8, instance.index);
                     if (launcher != null) {
                         if (BotUtils.clickMenu(instance.index, launcher)) {
                             instance.setState("Launched game (" + (i+1) + "/" + attempts + ")");
@@ -93,12 +158,29 @@ public class AutoStartGameTask {
                 }
                 
                 if (!shouldStop && !Thread.currentThread().isInterrupted()) {
-                    if (BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
-                        Point gameIcon = BotUtils.findImageOnScreenGray(screenPath, "game_icon.png", 0.8);
+                    // Final verification with robust screenshot
+                    boolean finalScreenshotSuccess = false;
+                    for (int retry = 0; retry < 3; retry++) {
+                        if (BotUtils.takeMenuScreenshotLegacy(instance.index, screenPath)) {
+                            File screenFile = new File(screenPath);
+                            if (screenFile.exists() && screenFile.length() > 15000) {
+                                finalScreenshotSuccess = true;
+                                break;
+                            }
+                        }
+                        BotUtils.delay(1000);
+                    }
+                    
+                    if (finalScreenshotSuccess) {
+                        Point gameIcon = BotUtils.findImageOnScreenGrayWithRetry(screenPath, "game_icon.png", 0.8, instance.index);
                         if (gameIcon != null) {
                             instance.setState("Game running successfully");
                             System.out.println("Game confirmed running for instance " + instance.index);
+                        } else {
+                            instance.setState("Game status uncertain");
                         }
+                    } else {
+                        instance.setState("Final verification failed");
                     }
                 }
             } catch (Exception e) {

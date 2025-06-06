@@ -3,109 +3,113 @@ package newgame;
 import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
-import javax.swing.*;
 import java.awt.Point;
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.io.*;
+import java.nio.file.*;
 import java.util.concurrent.TimeUnit;
 
 public class BotUtils {
     public static final String MEMUC_PATH = "C:\\Program Files\\Microvirt\\MEmu\\memuc.exe";
-    public static final String IMAGES_DIR = "images";
     public static final String SCREENSHOTS_DIR = "screenshots";
-    private static boolean openCvLoaded = false;
+    public static boolean openCvLoaded = false;
 
     static {
         try {
+            // Try to load OpenCV using the standard method
             System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
             openCvLoaded = true;
             System.out.println("OpenCV loaded successfully");
-        } catch (UnsatisfiedLinkError e) {
+        } catch (Exception | UnsatisfiedLinkError e) {
             System.err.println("Failed to load OpenCV: " + e.getMessage());
-            showError("OpenCV Error", "Failed to load OpenCV library. Image recognition will not work.\n" + e.getMessage());
+            System.err.println("OpenCV features will be disabled. Image matching will not work.");
+            System.err.println("To enable OpenCV: Install OpenCV for Java and add it to your path");
+            openCvLoaded = false;
         }
+    }
+
+    public static void init() {
+        System.out.println("=== MEmu Instance Manager Starting ===");
+        System.out.println("=== Cleaning up corrupted screenshots ===");
+        
+        // Clean up any corrupted screenshot files
+        cleanupCorruptedScreenshots();
+        
+        System.out.println("=== Cleanup complete ===");
+        
+        // Setup image directory
+        setupImageDirectory();
+    }
+
+    private static void cleanupCorruptedScreenshots() {
+        try {
+            File screenshotsDir = new File(SCREENSHOTS_DIR);
+            if (screenshotsDir.exists()) {
+                File[] files = screenshotsDir.listFiles((dir, name) -> name.endsWith(".png"));
+                if (files != null) {
+                    for (File file : files) {
+                        if (file.length() < 1000) { // Files smaller than 1KB are likely corrupted
+                            file.delete();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error during cleanup: " + e.getMessage());
+        }
+    }
+
+    private static void setupImageDirectory() {
+        System.out.println("=== Image Directory Setup ===");
+        File workingDir = new File(System.getProperty("user.dir"));
+        System.out.println("Working directory: " + workingDir.getAbsolutePath());
+        
+        // Look for images in src/images
+        File imagesDir = new File(workingDir, "src/images");
+        System.out.println("PRIORITY: Looking for images in " + imagesDir.getPath());
+        
+        if (imagesDir.exists() && imagesDir.isDirectory()) {
+            System.out.println("✅ Found src/images directory:");
+            File[] imageFiles = imagesDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".png"));
+            if (imageFiles != null) {
+                for (File imageFile : imageFiles) {
+                    System.out.println("  - " + imageFile.getName() + " (" + imageFile.length() + " bytes)");
+                    
+                    // Test if OpenCV can load the image
+                    if (openCvLoaded) {
+                        try {
+                            Mat testMat = Imgcodecs.imread(imageFile.getAbsolutePath(), Imgcodecs.IMREAD_GRAYSCALE);
+                            if (!testMat.empty()) {
+                                System.out.println("    ✅ OpenCV can load: " + imageFile.getName() + " (" + testMat.cols() + "x" + testMat.rows() + ")");
+                                testMat.release();
+                            } else {
+                                System.out.println("    ❌ OpenCV cannot load: " + imageFile.getName());
+                            }
+                        } catch (Exception e) {
+                            System.out.println("    ❌ Error loading " + imageFile.getName() + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        } else {
+            System.out.println("❌ src/images directory not found");
+        }
+        
+        System.out.println("============================");
     }
 
     public static boolean isOpenCvLoaded() {
         return openCvLoaded;
     }
 
-    public static Point findImageOnScreenGray(String screenPath, String templatePath, double threshold) {
-        if (!openCvLoaded) {
-            System.err.println("OpenCV not loaded, cannot perform image matching");
-            return null;
-        }
-
-        Mat screen = null;
-        Mat template = null;
-        Mat result = null;
-        
+    public static void createDirectoryIfNeeded(String dirPath) {
         try {
-            String fullTemplatePath = getImagePath(templatePath);
-            if (!Files.exists(Paths.get(fullTemplatePath))) {
-                System.err.println("Template image not found: " + fullTemplatePath);
-                return null;
+            Path path = Paths.get(dirPath);
+            if (!Files.exists(path)) {
+                Files.createDirectories(path);
             }
-
-            if (!Files.exists(Paths.get(screenPath))) {
-                System.err.println("Screen capture not found: " + screenPath);
-                return null;
-            }
-
-            screen = Imgcodecs.imread(screenPath, Imgcodecs.IMREAD_GRAYSCALE);
-            template = Imgcodecs.imread(fullTemplatePath, Imgcodecs.IMREAD_GRAYSCALE);
-
-            if (screen.empty() || template.empty()) {
-                System.err.println("Failed to load images for " + templatePath);
-                return null;
-            }
-
-            int resultCols = screen.cols() - template.cols() + 1;
-            int resultRows = screen.rows() - template.rows() + 1;
-            if (resultCols < 1 || resultRows < 1) {
-                System.err.println("Template too large for screen: " + templatePath);
-                return null;
-            }
-
-            result = new Mat(resultRows, resultCols, CvType.CV_32FC1);
-            Imgproc.matchTemplate(screen, template, result, Imgproc.TM_CCOEFF_NORMED);
-
-            Core.MinMaxLocResult mmr = Core.minMaxLoc(result);
-            
-            System.out.println("Template matching confidence: " + String.format("%.3f", mmr.maxVal) + 
-                             " (threshold: " + threshold + ") for " + templatePath);
-            
-            if (mmr.maxVal >= threshold) {
-                Point center = new Point(
-                    (int)(mmr.maxLoc.x + template.cols()/2.0),
-                    (int)(mmr.maxLoc.y + template.rows()/2.0)
-                );
-                System.out.println("Found template at: " + center + " for " + templatePath);
-                return center;
-            } else {
-                System.out.println("Template not found - confidence too low for " + templatePath);
-            }
-        } catch (Exception e) {
-            System.err.println("Image matching error for " + templatePath + ": " + e.getMessage());
-        } finally {
-            if (screen != null) screen.release();
-            if (template != null) template.release();
-            if (result != null) result.release();
+        } catch (IOException e) {
+            System.err.println("Failed to create directory: " + dirPath + " - " + e.getMessage());
         }
-        return null;
-    }
-
-    private static String getImagePath(String imageName) {
-        String imagesPath = Paths.get(IMAGES_DIR, imageName).toString();
-        if (Files.exists(Paths.get(imagesPath))) {
-            return imagesPath;
-        }
-        if (Files.exists(Paths.get(imageName))) {
-            return imageName;
-        }
-        return imagesPath;
     }
 
     public static boolean takeMenuScreenshotLegacy(int index, String savePath) {
@@ -159,6 +163,95 @@ public class BotUtils {
         }
     }
 
+    public static Point findImageOnScreenGrayWithRetry(String screenshotPath, String templateName, double threshold, int instanceIndex) {
+        if (!openCvLoaded) {
+            System.err.println("OpenCV not loaded, cannot perform image matching");
+            return null;
+        }
+
+        try {
+            // Find the template file
+            File templateFile = findImageFile(templateName);
+            if (templateFile == null) {
+                System.err.println("Template not found: " + templateName);
+                return null;
+            }
+
+            System.out.println("Found image at: " + templateFile.getAbsolutePath());
+            System.out.println("Loading template: " + templateFile.getAbsolutePath() + " (size: " + templateFile.length() + " bytes)");
+            System.out.println("Loading screen: " + screenshotPath + " (size: " + new File(screenshotPath).length() + " bytes)");
+
+            // Load template and screen images
+            Mat template = Imgcodecs.imread(templateFile.getAbsolutePath(), Imgcodecs.IMREAD_GRAYSCALE);
+            Mat screen = Imgcodecs.imread(screenshotPath, Imgcodecs.IMREAD_GRAYSCALE);
+
+            if (template.empty()) {
+                System.err.println("Failed to load template: " + templateName);
+                return null;
+            }
+
+            if (screen.empty()) {
+                System.err.println("Failed to load screenshot: " + screenshotPath);
+                template.release();
+                return null;
+            }
+
+            System.out.println("Screen dimensions: " + screen.cols() + "x" + screen.rows());
+            System.out.println("Template dimensions: " + template.cols() + "x" + template.rows());
+
+            // Perform template matching
+            Mat result = new Mat();
+            Imgproc.matchTemplate(screen, template, result, Imgproc.TM_CCOEFF_NORMED);
+
+            // Find the best match
+            Core.MinMaxLocResult mmr = Core.minMaxLoc(result);
+            double confidence = mmr.maxVal;
+
+            System.out.println("Template matching confidence: " + String.format("%.3f", confidence) + " (threshold: " + threshold + ") for " + templateName);
+
+            // Clean up
+            template.release();
+            screen.release();
+            result.release();
+
+            if (confidence >= threshold) {
+                Point matchPoint = new Point((int)mmr.maxLoc.x, (int)mmr.maxLoc.y);
+                System.out.println("Found template at: (" + matchPoint.x + ", " + matchPoint.y + ") for " + templateName);
+                return matchPoint;
+            } else {
+                System.out.println("Template not found - confidence too low for " + templateName);
+                return null;
+            }
+
+        } catch (Exception e) {
+            System.err.println("Error in image matching: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private static File findImageFile(String imageName) {
+        // Look in src/images first
+        File srcImagesFile = new File("src/images/" + imageName);
+        if (srcImagesFile.exists()) {
+            return srcImagesFile;
+        }
+
+        // Look in current directory
+        File currentDirFile = new File(imageName);
+        if (currentDirFile.exists()) {
+            return currentDirFile;
+        }
+
+        // Look in images subdirectory
+        File imagesSubdirFile = new File("images/" + imageName);
+        if (imagesSubdirFile.exists()) {
+            return imagesSubdirFile;
+        }
+
+        return null;
+    }
+
     public static boolean clickMenu(int index, Point pt) {
         try {
             ProcessBuilder builder = new ProcessBuilder(
@@ -185,9 +278,9 @@ public class BotUtils {
         }
     }
 
-    public static boolean delay(int millis) {
+    public static boolean delay(int milliseconds) {
         try {
-            Thread.sleep(millis);
+            Thread.sleep(milliseconds);
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -195,26 +288,37 @@ public class BotUtils {
         }
     }
 
-    public static void createDirectoryIfNeeded(String dirPath) {
+    public static boolean isInstanceRunning(int index) {
         try {
-            Files.createDirectories(Paths.get(dirPath));
-        } catch (IOException e) {
-            System.err.println("Failed to create directory " + dirPath + ": " + e.getMessage());
+            ProcessBuilder builder = new ProcessBuilder(MEMUC_PATH, "isvmrunning", "-i", String.valueOf(index));
+            Process process = builder.start();
+            
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String output = reader.readLine();
+                if (output != null) {
+                    String trimmedOutput = output.trim();
+                    return trimmedOutput.equals("1") || trimmedOutput.equalsIgnoreCase("Running");
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error checking if instance " + index + " is running: " + e.getMessage());
         }
+        return false;
     }
 
-    public static boolean isMemucInstalled() {
-        return Files.exists(Paths.get(MEMUC_PATH));
+    public static void enableAutoStart(int index) {
+        System.out.println("Auto Start Game is enabled for instance " + index);
+        // This method can be expanded to perform additional setup if needed
     }
 
-    public static void initializeDirectories() {
-        createDirectoryIfNeeded(IMAGES_DIR);
-        createDirectoryIfNeeded(SCREENSHOTS_DIR);
-    }
-
-    private static void showError(String title, String message) {
-        SwingUtilities.invokeLater(() -> 
-            JOptionPane.showMessageDialog(null, message, title, JOptionPane.ERROR_MESSAGE)
-        );
+    // Alias method for compatibility with other classes
+    public static Point findImageOnScreenGray(String screenshotPath, String templateName, double threshold) {
+        return findImageOnScreenGrayWithRetry(screenshotPath, templateName, threshold, 0);
     }
 }
