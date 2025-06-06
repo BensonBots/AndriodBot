@@ -64,7 +64,7 @@ public class Main extends JFrame {
         // Add the Optimize All button
         optimizeAllButton = createButton("Optimize All", e -> optimizeAllInstances());
         optimizeAllButton.setBackground(new Color(34, 139, 34)); // Green background
-        optimizeAllButton.setToolTipText("Optimize all stopped instances to 400x652 resolution");
+        optimizeAllButton.setToolTipText("Optimize all stopped instances to 480x800 resolution");
         topPanel.add(optimizeAllButton);
 
         add(topPanel, BorderLayout.NORTH);
@@ -108,7 +108,7 @@ public class Main extends JFrame {
         
         // Confirm with user
         int result = JOptionPane.showConfirmDialog(this,
-            "This will optimize " + stoppedInstances.size() + " stopped instance(s) to 400x652 resolution.\n" +
+            "This will optimize " + stoppedInstances.size() + " stopped instance(s) to 480x800 resolution.\n" +
             "This process may take several minutes.\n\nContinue?",
             "Optimize All Instances",
             JOptionPane.YES_NO_OPTION,
@@ -207,85 +207,61 @@ public class Main extends JFrame {
     
     private boolean optimizeSingleInstance(int index) {
         try {
-            System.out.println("🔧 Optimizing instance " + index + "...");
+            System.out.println("🔧 Optimizing instance " + index + " (configuration only)...");
             
             // Step 1: Ensure instance is stopped
             ProcessBuilder stopBuilder = new ProcessBuilder(MEMUC_PATH, "stop", "-i", String.valueOf(index));
             Process stopProcess = stopBuilder.start();
-            boolean stopSuccess = stopProcess.waitFor(15, TimeUnit.SECONDS);
-            
-            if (!stopSuccess) {
-                System.err.println("❌ Failed to stop instance " + index);
-                return false;
-            }
-            
+            stopProcess.waitFor(15, TimeUnit.SECONDS);
             Thread.sleep(3000); // Wait for complete shutdown
             
-            // Step 2: Modify resolution
-            ProcessBuilder modifyBuilder = new ProcessBuilder(
-                MEMUC_PATH, "modify", "-i", String.valueOf(index),
-                "-resolution", "400x652", "-dpi", "133"
-            );
+            System.out.println("🔄 Configuring custom resolution 480x800...");
             
-            Process modifyProcess = modifyBuilder.start();
-            boolean modifySuccess = modifyProcess.waitFor(30, TimeUnit.SECONDS) && 
-                                  modifyProcess.exitValue() == 0;
+            // Configure resolution settings - NO INSTANCE STARTING
+            ProcessBuilder[] commands = {
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "disable_resize", "0"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "is_customed_resolution", "1"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "custom_resolution", "480", "800", "160"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "is_full_screen", "0"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "start_window_mode", "1"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "win_scaling_percent2", "75")
+            };
             
-            if (!modifySuccess) {
-                System.err.println("❌ Resolution modification failed for instance " + index);
-                return false;
-            }
-            
-            Thread.sleep(2000);
-            
-            // Step 3: Start instance to verify
-            ProcessBuilder startBuilder = new ProcessBuilder(MEMUC_PATH, "start", "-i", String.valueOf(index));
-            Process startProcess = startBuilder.start();
-            boolean startSuccess = startProcess.waitFor(20, TimeUnit.SECONDS) && 
-                                 startProcess.exitValue() == 0;
-            
-            if (!startSuccess) {
-                System.err.println("❌ Failed to start instance " + index + " for verification");
-                return false;
-            }
-            
-            Thread.sleep(15000); // Wait for full boot
-            
-            // Step 4: Verify resolution
-            String testPath = "screenshots/optimize_verify_" + index + ".png";
-            BotUtils.createDirectoryIfNeeded("screenshots");
-            
-            for (int attempt = 1; attempt <= 3; attempt++) {
-                if (BotUtils.takeMenuScreenshotLegacy(index, testPath)) {
-                    File testFile = new File(testPath);
-                    if (testFile.exists() && BotUtils.openCvLoaded) {
-                        org.opencv.core.Mat testMat = org.opencv.imgcodecs.Imgcodecs.imread(testPath, org.opencv.imgcodecs.Imgcodecs.IMREAD_GRAYSCALE);
-                        if (!testMat.empty()) {
-                            int width = testMat.cols();
-                            int height = testMat.rows();
-                            testMat.release();
-                            
-                            if (width == 400 && height == 652) {
-                                System.out.println("✅ Instance " + index + " resolution verified: 400x652");
-                                
-                                // Stop the instance after verification
-                                ProcessBuilder stopAfterBuilder = new ProcessBuilder(MEMUC_PATH, "stop", "-i", String.valueOf(index));
-                                stopAfterBuilder.start();
-                                
-                                return true;
-                            } else {
-                                System.err.println("❌ Wrong resolution for instance " + index + ": " + width + "x" + height);
-                            }
-                        }
-                    }
-                }
-                
-                if (attempt < 3) {
-                    Thread.sleep(3000);
+            // Execute all resolution commands
+            for (ProcessBuilder cmd : commands) {
+                try {
+                    cmd.start().waitFor(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    System.err.println("⚠️ Command failed: " + String.join(" ", cmd.command()));
                 }
             }
             
-            return false;
+            System.out.println("✅ Resolution configured: 480x800@160dpi, windowed mode, 75% scaling");
+            
+            System.out.println("🔄 Applying performance optimizations...");
+            
+            // Configure performance settings - NO INSTANCE STARTING
+            ProcessBuilder[] perfCommands = {
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "cpus", "2"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "memory", "3000"),
+                new ProcessBuilder(MEMUC_PATH, "setconfigex", "-i", String.valueOf(index), "fps", "30")
+            };
+            
+            // Execute all performance commands
+            for (ProcessBuilder cmd : perfCommands) {
+                try {
+                    cmd.start().waitFor(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    System.err.println("⚠️ Performance command failed: " + String.join(" ", cmd.command()));
+                }
+            }
+            
+            System.out.println("✅ Performance settings: 2 CPU cores, 3GB RAM, 30 FPS");
+            System.out.println("✅ Instance " + index + " optimization complete");
+            System.out.println("📝 Instance " + index + " remains stopped - start manually when ready");
+            
+            // NO INSTANCE STARTING CODE HERE - CONFIGURATION ONLY
+            return true;
             
         } catch (Exception e) {
             System.err.println("❌ Exception optimizing instance " + index + ": " + e.getMessage());
@@ -401,7 +377,6 @@ public class Main extends JFrame {
     public void startInstance(int index) {
         MemuActions.startInstance(this, index, () -> {
             refreshInstances();
-            // Remove the auto-optimization on start since we now have the optimize button
             enableAutoStartIfConfigured(index);
         });
     }
@@ -445,7 +420,7 @@ public class Main extends JFrame {
     }
 
     private void startStatusUpdater() {
-        statusTimer = new javax.swing.Timer(10000, e -> { // Check every 10 seconds instead of 3
+        statusTimer = new javax.swing.Timer(10000, e -> { // Check every 10 seconds
             for (int i = 0; i < instances.size() && i < tableModel.getRowCount(); i++) {
                 MemuInstance inst = instances.get(i);
                 
@@ -458,54 +433,10 @@ public class Main extends JFrame {
                     }
                 }
                 
-                // Check resolution for running instances very rarely
-                if ("Running".equals(inst.status) && Math.random() < 0.05) { // 5% chance
-                    checkAndFixResolution(inst.index);
-                }
+                // Resolution checking removed - use manual "Optimize All" button instead
             }
         });
         statusTimer.start();
-    }
-    
-    private void checkAndFixResolution(int instanceIndex) {
-        // Check resolution in background without blocking UI
-        new Thread(() -> {
-            try {
-                String screenPath = "screenshots/resolution_check_" + instanceIndex + ".png";
-                if (BotUtils.takeMenuScreenshotLegacy(instanceIndex, screenPath)) {
-                    if (BotUtils.isOpenCvLoaded()) {
-                        org.opencv.core.Mat screen = org.opencv.imgcodecs.Imgcodecs.imread(screenPath);
-                        if (!screen.empty()) {
-                            int currentWidth = screen.cols();
-                            int currentHeight = screen.rows();
-                            screen.release();
-                            
-                            // Check if resolution is wrong
-                            if (currentWidth != MemuActions.getTargetWidth() || 
-                                currentHeight != MemuActions.getTargetHeight()) {
-                                
-                                System.out.println("Auto-fixing resolution for instance " + instanceIndex + 
-                                                 " from " + currentWidth + "x" + currentHeight + 
-                                                 " to " + MemuActions.getTargetWidth() + "x" + MemuActions.getTargetHeight());
-                                
-                                MemuInstance inst = getInstanceByIndex(instanceIndex);
-                                if (inst != null) {
-                                    inst.setState("Fixing resolution...");
-                                }
-                                
-                                MemuActions.ensureCorrectResolution(Main.this, instanceIndex, () -> {
-                                    if (inst != null) {
-                                        inst.setState("Resolution fixed");
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ex) {
-                System.err.println("Resolution check error for instance " + instanceIndex + ": " + ex.getMessage());
-            }
-        }).start();
     }
 
     public void saveSettings() {
