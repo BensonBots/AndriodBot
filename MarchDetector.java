@@ -48,6 +48,37 @@ public class MarchDetector {
         }
     }
     
+    // Auto Gather Settings Classes
+    public static class AutoGatherSettings {
+        public int numberOfMarches;
+        public List<MarchSetting> marchSettings;
+        
+        public AutoGatherSettings() {
+            this.numberOfMarches = 2;
+            this.marchSettings = new ArrayList<>();
+            // Default settings
+            marchSettings.add(new MarchSetting(1, "Food", 1));
+            marchSettings.add(new MarchSetting(2, "Wood", 1));
+        }
+    }
+    
+    public static class MarchSetting {
+        public int marchNumber;
+        public String resourceType; // Food, Wood, Stone, Iron
+        public int level; // 1-8
+        
+        public MarchSetting(int marchNumber, String resourceType, int level) {
+            this.marchNumber = marchNumber;
+            this.resourceType = resourceType;
+            this.level = level;
+        }
+        
+        @Override
+        public String toString() {
+            return "March " + marchNumber + ": " + resourceType + " Lv." + level;
+        }
+    }
+    
     // Tesseract OCR path - adjust this to your installation
     private static final String TESSERACT_PATH = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe";
     
@@ -102,326 +133,146 @@ public class MarchDetector {
     }
     
     /**
-     * Read march queue statuses using OCR
+     * Read march queue statuses using simplified OCR on left panel only
      */
     public static List<MarchInfo> readMarchQueues(int instanceIndex) {
-        System.out.println("📋 Reading march queues using OCR for instance " + instanceIndex);
+        System.out.println("[Instance " + instanceIndex + "] 📋 Reading march queues...");
         
-        String screenPath = "screenshots/march_queues_" + instanceIndex + ".png";
-        if (!BotUtils.takeMenuScreenshotLegacy(instanceIndex, screenPath)) {
-            System.err.println("Failed to take screenshot for march queues");
+        // Take screenshot of the whole screen first
+        String fullScreenPath = "screenshots/march_full_" + instanceIndex + ".png";
+        if (!BotUtils.takeMenuScreenshotLegacy(instanceIndex, fullScreenPath)) {
+            System.err.println("❌ Failed to take full screenshot");
             return new ArrayList<>();
         }
         
-        List<MarchInfo> marches = new ArrayList<>();
-        
-        // Based on your screenshot, adjust regions to better capture the different parts
-        Rectangle[] queueRegions = {
-            new Rectangle(20, 170, 180, 45),  // March Queue 1 - expanded to capture timer
-            new Rectangle(20, 215, 180, 45),  // March Queue 2 - expanded  
-            new Rectangle(20, 260, 180, 35),  // March Queue 3
-            new Rectangle(20, 295, 180, 35),  // March Queue 4
-            new Rectangle(20, 330, 180, 35),  // March Queue 5
-            new Rectangle(20, 365, 180, 35)   // March Queue 6
-        };
-        
-        for (int i = 0; i < queueRegions.length; i++) {
-            int queueNumber = i + 1;
-            MarchInfo marchInfo = analyzeQueueWithOCR(screenPath, queueRegions[i], queueNumber);
-            marches.add(marchInfo);
-            System.out.println("📊 " + marchInfo);
+        // Extract only the left march queue panel (based on your image)
+        String leftPanelPath = extractLeftPanel(fullScreenPath, instanceIndex);
+        if (leftPanelPath == null) {
+            System.err.println("❌ Failed to extract left panel");
+            return new ArrayList<>();
         }
         
-        return marches;
+        // OCR only the left panel - much cleaner text
+        String fullText = performSimpleOCR(leftPanelPath);
+        if (fullText == null || fullText.trim().isEmpty()) {
+            System.err.println("❌ OCR returned empty text");
+            return new ArrayList<>();
+        }
+        
+        System.out.println("📋 Left panel OCR text:");
+        System.out.println("--- Start OCR Text ---");
+        System.out.println(fullText);
+        System.out.println("--- End OCR Text ---");
+        
+        // Parse the text to extract march queue information
+        return parseMarchQueues(fullText);
     }
     
     /**
-     * Analyze a specific queue region using OCR
+     * Extract just the text area from the left march queue panel (no flag icons)
      */
-    private static MarchInfo analyzeQueueWithOCR(String screenPath, Rectangle region, int queueNumber) {
+    private static String extractLeftPanel(String fullScreenPath, int instanceIndex) {
         if (!BotUtils.isOpenCvLoaded()) {
-            return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
+            return null;
         }
         
-        Mat screen = null;
-        Mat roi = null;
-        Mat processed = null;
+        Mat fullScreen = null;
+        Mat leftPanel = null;
         
         try {
-            screen = Imgcodecs.imread(screenPath, Imgcodecs.IMREAD_COLOR);
-            if (screen.empty()) {
-                return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
+            fullScreen = Imgcodecs.imread(fullScreenPath, Imgcodecs.IMREAD_COLOR);
+            if (fullScreen.empty()) {
+                return null;
             }
             
-            // Extract the queue region
-            Rect roiRect = new Rect(
-                Math.max(0, region.x),
-                Math.max(0, region.y),
-                Math.min(region.width, screen.cols() - Math.max(0, region.x)),
-                Math.min(region.height, screen.rows() - Math.max(0, region.y))
-            );
+            // Based on your image, we need to avoid the flag icons on the left
+            // The text area starts after the flags (around x=50) and goes to about x=300
+            // Y coordinates remain the same: 190-500
+            int panelX = 50;     // Start after the flag icons (was 20)
+            int panelY = 190; 
+            int panelWidth = 230; // Narrower to avoid flags (was 280)
+            int panelHeight = 310;
             
-            roi = new Mat(screen, roiRect);
+            // Make sure coordinates are within bounds
+            panelX = Math.max(0, panelX);
+            panelY = Math.max(0, panelY);
+            panelWidth = Math.min(panelWidth, fullScreen.cols() - panelX);
+            panelHeight = Math.min(panelHeight, fullScreen.rows() - panelY);
             
-            // Save raw ROI for debugging
-            String rawRoiPath = "screenshots/queue_" + queueNumber + "_raw.png";
-            Imgcodecs.imwrite(rawRoiPath, roi);
-            System.out.println("Queue " + queueNumber + " raw ROI saved to: " + rawRoiPath);
+            // Extract the text-only region (no flags)
+            Rect panelRect = new Rect(panelX, panelY, panelWidth, panelHeight);
+            leftPanel = new Mat(fullScreen, panelRect);
             
-            // Try multiple preprocessing approaches
-            String ocrText = tryMultiplePreprocessingMethods(roi, queueNumber);
+            // Save the extracted text panel
+            String leftPanelPath = "screenshots/march_text_panel_" + instanceIndex + ".png";
+            Imgcodecs.imwrite(leftPanelPath, leftPanel);
             
-            // Analyze OCR results directly
-            MarchInfo result = analyzeOCRText(queueNumber, ocrText);
+            // Print file size for debugging
+            File panelFile = new File(leftPanelPath);
+            if (panelFile.exists()) {
+                System.out.println("Text panel extracted (no flags): " + leftPanelPath + " (" + panelFile.length() + " bytes)");
+            }
             
-            System.out.println("Queue " + queueNumber + " final OCR text: '" + ocrText.trim() + "'");
-            
-            return result;
+            return leftPanelPath;
             
         } catch (Exception e) {
-            System.err.println("Error analyzing queue " + queueNumber + " with OCR: " + e.getMessage());
-            return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
+            System.err.println("❌ Error extracting text panel: " + e.getMessage());
+            return null;
         } finally {
-            // Clean up
-            if (screen != null) screen.release();
-            if (roi != null) roi.release();
-            if (processed != null) processed.release();
+            if (fullScreen != null) fullScreen.release();
+            if (leftPanel != null) leftPanel.release();
         }
     }
     
     /**
-     * Try multiple preprocessing methods to find what works best
+     * Perform optimized OCR on the clean text panel using better settings
      */
-    private static String tryMultiplePreprocessingMethods(Mat roi, int queueNumber) {
-        // Test more aggressive preprocessing since basic approaches aren't working well
-        String[] methodNames = {"ContrastEnhanced3x", "BinaryThreshold3x", "Crisp4x"};
-        String bestResult = "";
-        int bestScore = 0;
-        
-        for (int method = 0; method < 3; method++) {
-            Mat processed = null;
-            try {
-                processed = preprocessImageMethod(roi, method);
-                String ocrImagePath = "screenshots/queue_" + queueNumber + "_method" + method + ".png";
-                Imgcodecs.imwrite(ocrImagePath, processed);
+    private static String performSimpleOCR(String imagePath) {
+        try {
+            // Try multiple OCR configurations to find the best one
+            String[] configs = {
+                // Config 1: PSM 6 with character whitelist (best for UI text)
+                "--psm,6,--oem,1,-c,tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ",
                 
-                // Try OCR with simpler settings first
-                String result = runSimpleOCR(ocrImagePath, queueNumber, methodNames[method]);
-                int score = scoreOCRResult(result, queueNumber);
+                // Config 2: PSM 4 for single column of text
+                "--psm,4,--oem,1,-c,tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ",
                 
-                System.out.println("Queue " + queueNumber + " " + methodNames[method] + " preprocessing: '" + result.trim() + "' (score: " + score + ")");
+                // Config 3: PSM 6 with legacy engine (sometimes more accurate)
+                "--psm,6,--oem,0,-c,tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ",
+                
+                // Config 4: Default PSM 3 with whitelist
+                "--psm,3,--oem,1,-c,tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 "
+            };
+            
+            String bestResult = "";
+            int bestScore = 0;
+            
+            for (String config : configs) {
+                String[] configArray = config.split(",");
+                String result = runTesseractOCR(imagePath, configArray);
+                int score = scoreOCRQuality(result);
+                
+                System.out.println("🔍 OCR Config " + configArray[1] + ": Score " + score + " - '" + result.replaceAll("\n", " | ").trim() + "'");
                 
                 if (score > bestScore) {
                     bestScore = score;
                     bestResult = result;
                 }
-                
-                // If we get a good result, stop trying other methods
-                if (score > 40) {
-                    System.out.println("Queue " + queueNumber + " " + methodNames[method] + " successful, skipping other methods");
-                    break;
-                }
-                
-            } catch (Exception e) {
-                System.err.println("Error in preprocessing method " + method + ": " + e.getMessage());
-            } finally {
-                if (processed != null) processed.release();
             }
+            
+            System.out.println("✅ Best OCR result (score: " + bestScore + ")");
+            return bestResult;
+            
+        } catch (Exception e) {
+            System.err.println("❌ OCR failed: " + e.getMessage());
+            return "";
         }
-        
-        return bestResult;
     }
     
     /**
-     * Run simple OCR configurations - focus on the most promising settings
+     * Score OCR quality based on expected patterns
      */
-    private static String runSimpleOCR(String imagePath, int queueNumber, String methodName) {
-        // Just the most promising OCR settings based on our testing
-        String[][] ocrConfigs = {
-            // Best performers from previous tests
-            {"--psm", "6", "--oem", "1"}, // PSM 6 worked best with Light2xUpscale
-            {"--psm", "3", "--oem", "1"}, // Default
-            {"--psm", "7", "--oem", "1"}, // Single line
-            {"--psm", "8", "--oem", "1"}  // Single word
-        };
-        
-        String bestResult = "";
-        int bestScore = 0;
-        
-        for (int i = 0; i < ocrConfigs.length; i++) {
-            String result = runTesseractOCR(imagePath, ocrConfigs[i]);
-            int score = scoreOCRResult(result, queueNumber);
-            
-            // Show attempts for first 2 queues
-            if (queueNumber <= 2) {
-                System.out.println("  Queue " + queueNumber + " " + methodName + " PSM:" + ocrConfigs[i][1] + " -> '" + result.trim() + "' (score: " + score + ")");
-            }
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestResult = result;
-            }
-        }
-        
-        return bestResult;
-    }
-    
-    /**
-     * Run specialized OCR with settings that match the successful online demo
-     */
-    private static String runSpecializedOCR(String imagePath, int queueNumber, String methodName) {
-        // OCR configurations based on what works in online Tesseract
-        String[][] ocrConfigs = {
-            // Config 1: Default settings (like online demo) - often the best
-            {"--psm", "3", "--oem", "1"},
-            
-            // Config 2: Uniform block of text
-            {"--psm", "6", "--oem", "1"},
-            
-            // Config 3: Single text line
-            {"--psm", "7", "--oem", "1"},
-            
-            // Config 4: Single word
-            {"--psm", "8", "--oem", "1"},
-            
-            // Config 5: Legacy engine (sometimes more accurate)
-            {"--psm", "3", "--oem", "0"},
-            
-            // Config 6: Combined engines
-            {"--psm", "3", "--oem", "3"},
-            
-            // Config 7: Auto page segmentation
-            {"--psm", "1", "--oem", "1"}
-        };
-        
-        String bestResult = "";
-        int bestScore = 0;
-        
-        for (int i = 0; i < ocrConfigs.length; i++) {
-            String result = runTesseractOCR(imagePath, ocrConfigs[i]);
-            int score = scoreOCRResult(result, queueNumber);
-            
-            // Show all attempts for first 2 queues to see what's happening
-            if (queueNumber <= 2) {
-                System.out.println("Queue " + queueNumber + " " + methodName + " OCR config " + (i+1) + " (PSM:" + ocrConfigs[i][1] + " OEM:" + ocrConfigs[i][3] + "): '" + result.trim() + "' (score: " + score + ")");
-            }
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestResult = result;
-            }
-        }
-        
-        return bestResult;
-    }
-    
-    /**
-     * Run optimized OCR specifically tuned for game UI text
-     */
-    private static String runOptimizedOCR(String imagePath, int queueNumber, String methodName) {
-        // OCR configurations optimized for game UI
-        String[][] ocrConfigs = {
-            // Config 1: Single text block (best for UI elements)
-            {"--psm", "6", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"},
-            
-            // Config 2: Treat image as single text line
-            {"--psm", "7", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"},
-            
-            // Config 3: Single word (good for simple labels)
-            {"--psm", "8", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"},
-            
-            // Config 4: Raw line (sparse text)
-            {"--psm", "13", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"}
-        };
-        
-        String bestResult = "";
-        int bestScore = 0;
-        
-        for (int i = 0; i < ocrConfigs.length; i++) {
-            String result = runTesseractOCR(imagePath, ocrConfigs[i]);
-            int score = scoreOCRResult(result, queueNumber);
-            
-            // Only show detailed attempts for first 2 queues to reduce spam
-            if (queueNumber <= 2) {
-                System.out.println("Queue " + queueNumber + " " + methodName + " OCR config " + (i+1) + ": '" + result.trim() + "' (score: " + score + ")");
-            }
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestResult = result;
-            }
-        }
-        
-        return bestResult;
-    }
-    
-    /**
-     * Different preprocessing methods - back to clean, simple approaches
-     */
-    private static Mat preprocessImageMethod(Mat roi, int method) {
-        Mat result = new Mat();
-        
-        switch (method) {
-            case 0: // Original image - no processing
-                result = roi.clone();
-                break;
-                
-            case 1: // Just grayscale conversion
-                Imgproc.cvtColor(roi, result, Imgproc.COLOR_BGR2GRAY);
-                break;
-                
-            case 2: // Clean 2x upscale with Lanczos (smooth, high quality)
-                Mat gray = new Mat();
-                Imgproc.cvtColor(roi, gray, Imgproc.COLOR_BGR2GRAY);
-                Imgproc.resize(gray, result, new Size(gray.cols() * 2, gray.rows() * 2), 0, 0, Imgproc.INTER_LANCZOS4);
-                gray.release();
-                break;
-        }
-        
-        return result;
-    }
-    
-    /**
-     * Run multiple OCR attempts with different settings for best accuracy
-     */
-    private static String runMultipleOCRAttempts(String imagePath, int queueNumber, String methodName) {
-        // OCR configuration attempts - optimized for what we know works
-        String[][] ocrConfigs = {
-            // Config 1: Standard text recognition
-            {"--psm", "6", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"},
-            
-            // Config 2: Single text line
-            {"--psm", "7", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"},
-            
-            // Config 3: Raw line without word detection
-            {"--psm", "13", "--oem", "1", "-c", "tessedit_char_whitelist=0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .()/-"}
-        };
-        
-        String bestResult = "";
-        int bestScore = 0;
-        
-        for (int i = 0; i < ocrConfigs.length; i++) {
-            String result = runTesseractOCR(imagePath, ocrConfigs[i]);
-            int score = scoreOCRResult(result, queueNumber);
-            
-            // Only show detailed attempts for first 2 queues to reduce spam
-            if (queueNumber <= 2) {
-                System.out.println("Queue " + queueNumber + " " + methodName + " OCR config " + (i+1) + ": '" + result.trim() + "' (score: " + score + ")");
-            }
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestResult = result;
-            }
-        }
-        
-        return bestResult;
-    }
-    
-    /**
-     * Score OCR result based on recognizable keywords and patterns
-     */
-    private static int scoreOCRResult(String text, int queueNumber) {
+    private static int scoreOCRQuality(String text) {
         if (text == null || text.trim().isEmpty()) {
             return 0;
         }
@@ -429,52 +280,196 @@ public class MarchDetector {
         String lowerText = text.toLowerCase();
         int score = 0;
         
-        // Score based on recognizable keywords - enhanced scoring
-        String[] highValueKeywords = {"gathering", "idle", "unlock", "cannot", "lumberyard"};
-        String[] mediumValueKeywords = {"stone", "gold", "food", "queue", "march", "lv", "level"};
+        // High value keywords
+        if (lowerText.contains("march queue")) score += 20;
+        if (lowerText.contains("idle")) score += 15;
+        if (lowerText.contains("unlock")) score += 15;
+        if (lowerText.contains("cannot use")) score += 15;
         
-        for (String keyword : highValueKeywords) {
-            if (lowerText.contains(keyword)) {
-                score += 15; // Higher score for important keywords
+        // Structure patterns
+        if (lowerText.matches(".*march queue [1-6].*")) score += 10;
+        
+        // Penalty for obvious OCR errors
+        if (lowerText.contains("] ") || lowerText.contains(") ")) score -= 5;
+        if (lowerText.contains("irc") || lowerText.contains("ile")) score -= 3;
+        
+        // Bonus for clean structure
+        String[] lines = text.split("\n");
+        int validLines = 0;
+        for (String line : lines) {
+            String cleanLine = line.trim().toLowerCase();
+            if (cleanLine.contains("march queue") || 
+                cleanLine.equals("idle") || 
+                cleanLine.equals("unlock") || 
+                cleanLine.equals("cannot use")) {
+                validLines++;
             }
         }
-        
-        for (String keyword : mediumValueKeywords) {
-            if (lowerText.contains(keyword)) {
-                score += 8;
-            }
-        }
-        
-        // Bonus for "as idle" pattern (common OCR output)
-        if (lowerText.contains("as idle") || lowerText.contains("as ilde")) {
-            score += 20;
-        }
-        
-        // Score based on timer patterns
-        if (lowerText.matches(".*\\d{1,2}:\\d{2}(:\\d{2})?.*")) {
-            score += 25; // High score for timer patterns
-        }
-        
-        // Bonus for reasonable text length
-        if (lowerText.length() > 5 && lowerText.length() < 100) {
-            score += 3;
-        }
-        
-        // Penalty for too many unrecognizable characters or single characters
-        if (lowerText.length() == 1 && lowerText.matches("\\d")) {
-            score -= 10; // Heavy penalty for single digits like "0"
-        }
-        
-        int alphabeticChars = lowerText.replaceAll("[^a-z]", "").length();
-        int totalChars = lowerText.length();
-        if (totalChars > 0) {
-            double readabilityRatio = (double) alphabeticChars / totalChars;
-            if (readabilityRatio < 0.3) {
-                score -= 5;
-            }
-        }
+        score += validLines * 5;
         
         return score;
+    }
+    
+    /**
+     * Parse the left panel OCR text to extract march queue information
+     */
+    private static List<MarchInfo> parseMarchQueues(String ocrText) {
+        List<MarchInfo> queues = new ArrayList<>();
+        
+        // Split text into lines and clean up
+        String[] lines = ocrText.split("\n");
+        List<String> cleanLines = new ArrayList<>();
+        
+        for (String line : lines) {
+            String cleaned = line.trim();
+            if (!cleaned.isEmpty() && 
+                !cleaned.toLowerCase().contains("ss ee ee") && // Filter out garbage
+                !cleaned.toLowerCase().equals("march queue")) { // Filter out header
+                cleanLines.add(cleaned);
+            }
+        }
+        
+        System.out.println("📋 Cleaned lines: " + cleanLines);
+        
+        // Track current queue number for gathering detection
+        int expectedQueueNumber = 1;
+        
+        // Parse lines looking for queue patterns
+        for (int i = 0; i < cleanLines.size(); i++) {
+            String line = cleanLines.get(i).toLowerCase();
+            
+            // Check for gathering march (appears without "March Queue X" header)
+            if (line.contains("gathering") || line.contains("lv") || line.contains("mill") || line.contains("quarry") || line.contains("mine")) {
+                MarchInfo gatheringQueue = new MarchInfo(expectedQueueNumber, MarchStatus.GATHERING, null, extractResourceFromGathering(line));
+                queues.add(gatheringQueue);
+                System.out.println("📊 March Queue " + expectedQueueNumber + ": GATHERING - " + extractResourceFromGathering(line));
+                expectedQueueNumber++;
+                continue;
+            }
+            
+            // Look for "March Queue X" pattern
+            if (line.contains("march") && line.contains("queue")) {
+                // Extract queue number
+                Pattern numberPattern = Pattern.compile("queue\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
+                Matcher numberMatcher = numberPattern.matcher(line);
+                
+                int queueNumber = expectedQueueNumber; // Use expected number if not found
+                if (numberMatcher.find()) {
+                    try {
+                        queueNumber = Integer.parseInt(numberMatcher.group(1));
+                    } catch (NumberFormatException e) {
+                        // Keep expected number
+                    }
+                }
+                
+                // Look at the next line for status
+                MarchStatus status = MarchStatus.IDLE; // default
+                if (i + 1 < cleanLines.size()) {
+                    String statusLine = cleanLines.get(i + 1).toLowerCase();
+                    
+                    if (statusLine.contains("idle")) {
+                        status = MarchStatus.IDLE;
+                    } else if (statusLine.contains("unlock")) {
+                        status = MarchStatus.UNLOCK;
+                    } else if (statusLine.contains("cannot") || statusLine.contains("use")) {
+                        status = MarchStatus.CANNOT_USE;
+                    } else if (statusLine.contains("gathering") || 
+                               statusLine.contains("lv") || 
+                               statusLine.contains("mill") || 
+                               statusLine.contains("quarry") || 
+                               statusLine.contains("mine") ||
+                               statusLine.matches(".*\\d{2}[:\\.]\\d{2}.*")) { // Any timer pattern
+                        status = MarchStatus.GATHERING;
+                    }
+                    
+                    // Skip the status line in next iteration
+                    i++; // This prevents processing the status line as a queue line
+                }
+                
+                // Check if we already have this queue number (prevent duplicates)
+                final int finalQueueNumber = queueNumber; // Make final for lambda
+                boolean alreadyExists = queues.stream()
+                    .anyMatch(q -> q.queueNumber == finalQueueNumber);
+                
+                if (!alreadyExists) {
+                    MarchInfo queue = new MarchInfo(queueNumber, status);
+                    queues.add(queue);
+                    System.out.println("📊 March Queue " + queueNumber + ": " + status);
+                }
+                
+                expectedQueueNumber = Math.max(expectedQueueNumber, queueNumber + 1);
+            }
+        }
+        
+        // If no queues found, try alternate parsing approach
+        if (queues.isEmpty()) {
+            queues = parseByLines(cleanLines);
+        }
+        
+        // Sort queues by number to ensure correct order
+        queues.sort((a, b) -> Integer.compare(a.queueNumber, b.queueNumber));
+        
+        return queues;
+    }
+    
+    /**
+     * Alternative parsing approach - look for status keywords directly
+     */
+    private static List<MarchInfo> parseByLines(List<String> lines) {
+        List<MarchInfo> queues = new ArrayList<>();
+        System.out.println("🔍 Trying alternate parsing approach...");
+        
+        int queueNumber = 1;
+        for (String line : lines) {
+            String lowerLine = line.toLowerCase();
+            
+            // Skip "March Queue" header lines
+            if (lowerLine.contains("march") && lowerLine.contains("queue")) {
+                continue;
+            }
+            
+            // Look for status keywords
+            if (lowerLine.contains("idle")) {
+                queues.add(new MarchInfo(queueNumber++, MarchStatus.IDLE));
+                System.out.println("📊 Found Queue " + (queueNumber-1) + ": IDLE");
+            } else if (lowerLine.contains("unlock")) {
+                queues.add(new MarchInfo(queueNumber++, MarchStatus.UNLOCK));
+                System.out.println("📊 Found Queue " + (queueNumber-1) + ": UNLOCK");
+            } else if (lowerLine.contains("cannot") || lowerLine.contains("use")) {
+                queues.add(new MarchInfo(queueNumber++, MarchStatus.CANNOT_USE));
+                System.out.println("📊 Found Queue " + (queueNumber-1) + ": CANNOT_USE");
+            } else if (lowerLine.contains("gathering") || lowerLine.matches(".*\\d{1,2}:\\d{2}.*")) {
+                queues.add(new MarchInfo(queueNumber++, MarchStatus.GATHERING));
+                System.out.println("📊 Found Queue " + (queueNumber-1) + ": GATHERING");
+            }
+        }
+        
+        return queues;
+    }
+    
+    /**
+     * Create default queues when OCR fails to detect patterns
+     */
+    private static List<MarchInfo> createDefaultQueues(List<String> lines) {
+        List<MarchInfo> queues = new ArrayList<>();
+        System.out.println("🔧 Creating default queue structure (OCR detection failed)");
+        
+        // Create 6 default queues based on typical game structure
+        for (int i = 1; i <= 6; i++) {
+            MarchStatus status;
+            if (i <= 2) {
+                status = MarchStatus.IDLE; // First 2 queues usually available
+            } else if (i == 3) {
+                status = MarchStatus.UNLOCK; // Third queue often needs unlock
+            } else {
+                status = MarchStatus.CANNOT_USE; // Higher queues typically locked
+            }
+            
+            queues.add(new MarchInfo(i, status));
+            System.out.println("📊 Default Queue " + i + ": " + status);
+        }
+        
+        return queues;
     }
     
     /**
@@ -515,122 +510,129 @@ public class MarchDetector {
             // Wait for completion
             int exitCode = process.waitFor();
             if (exitCode != 0) {
-                // Don't spam errors for failed attempts
+                System.err.println("⚠️ Tesseract OCR failed with exit code: " + exitCode);
                 return "";
             }
             
             return output.toString();
             
         } catch (Exception e) {
+            System.err.println("❌ Tesseract OCR exception: " + e.getMessage());
             return "";
         }
     }
     
     /**
-     * Analyze OCR text to determine march status with improved fuzzy matching
+     * Extract resource type from gathering text
      */
-    private static MarchInfo analyzeOCRText(int queueNumber, String ocrText) {
-        String text = ocrText.toLowerCase().trim();
+    private static String extractResourceFromGathering(String text) {
+        if (text.contains("mill")) {
+            return "Food";
+        } else if (text.contains("lumberyard") || text.contains("lumber")) {
+            return "Wood";
+        } else if (text.contains("quarry")) {
+            return "Stone";
+        } else if (text.contains("mine") || text.contains("iron")) {
+            return "Iron";
+        }
+        return "Unknown";
+    }
+    
+    /**
+     * Analyze current march status and determine what actions are needed
+     */
+    public static void analyzeGatheringNeeds(List<MarchInfo> currentQueues, AutoGatherSettings settings) {
+        System.out.println("🔍 Analyzing gathering needs with settings:");
+        for (MarchSetting setting : settings.marchSettings) {
+            System.out.println("  " + setting);
+        }
+        System.out.println();
         
-        // Remove line breaks and normalize spaces
-        text = text.replaceAll("\\s+", " ");
+        // Track which marches are assigned
+        boolean[] marchAssigned = new boolean[settings.numberOfMarches + 1]; // 1-based indexing
         
-        System.out.println("Queue " + queueNumber + " processed text: '" + text + "'");
-        
-        // Check for gathering status with timer pattern and fuzzy matching
-        Pattern timerPattern = Pattern.compile("\\d{1,2}:\\d{2}(:\\d{2})?");
-        Matcher timerMatcher = timerPattern.matcher(text);
-        
-        // Look for gathering keywords and patterns (including fuzzy matches)
-        boolean isGathering = timerMatcher.find() || 
-            text.contains("gathering") || 
-            containsFuzzy(text, "lumberyard", "lamberyar", "lumber", "lumberya") ||
-            containsFuzzy(text, "stone", "quarry") ||
-            containsFuzzy(text, "gold", "mine") ||
-            containsFuzzy(text, "food", "farm") ||
-            text.contains("lv") ||  // Level indicator
-            (text.contains("idle") && text.contains("gathering"));
-        
-        if (isGathering) {
-            String remainingTime = null;
-            if (timerMatcher.find()) {
-                timerMatcher.reset();
-                if (timerMatcher.find()) {
-                    remainingTime = timerMatcher.group();
+        // First pass: Check what's already gathering
+        System.out.println("📊 Current queue status:");
+        for (MarchInfo queue : currentQueues) {
+            System.out.println("  Queue " + queue.queueNumber + ": " + queue.status + 
+                             (queue.resourceInfo != null ? " (" + queue.resourceInfo + ")" : ""));
+            
+            if (queue.status == MarchStatus.GATHERING && queue.resourceInfo != null) {
+                // Try to match this gathering march to a setting
+                for (int i = 0; i < settings.marchSettings.size(); i++) {
+                    MarchSetting setting = settings.marchSettings.get(i);
+                    if (!marchAssigned[setting.marchNumber] && 
+                        queue.resourceInfo.equals(setting.resourceType)) {
+                        marchAssigned[setting.marchNumber] = true;
+                        System.out.println("  ✅ March " + setting.marchNumber + " is active: " + 
+                                         queue.resourceInfo + " (Queue " + queue.queueNumber + ")");
+                        break;
+                    }
                 }
             }
-            
-            String resourceInfo = extractResourceType(text);
-            return new MarchInfo(queueNumber, MarchStatus.GATHERING, remainingTime, resourceInfo);
         }
         
-        // Check for idle status (enhanced patterns)
-        if (containsFuzzy(text, "idle", "idte", "idel", "ilde") || 
-            text.contains("as idle") || 
-            text.contains("as ilde") ||
-            (text.contains("march") && text.contains("queue") && !isGathering)) {
-            return new MarchInfo(queueNumber, MarchStatus.IDLE);
-        }
+        System.out.println();
         
-        // Check for unlock status
-        if (containsFuzzy(text, "unlock", "unock", "ulcock", "unlck")) {
-            return new MarchInfo(queueNumber, MarchStatus.UNLOCK);
-        }
-        
-        // Check for cannot use status
-        if (containsFuzzy(text, "cannot", "can't", "canot", "cant") || 
-            (text.contains("use") && !text.contains("queue"))) {
-            return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
-        }
-        
-        // If OCR text is too garbled (less than 3 meaningful characters), use position-based defaults
-        if (text.replaceAll("[^a-z]", "").length() < 3) {
-            System.out.println("Queue " + queueNumber + " OCR too unclear, using position defaults");
-            if (queueNumber <= 2) {
-                return new MarchInfo(queueNumber, MarchStatus.IDLE);
-            } else if (queueNumber == 3) {
-                return new MarchInfo(queueNumber, MarchStatus.UNLOCK);
-            } else {
-                return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
+        // Second pass: Determine what needs to be started
+        System.out.println("🎯 Required actions:");
+        for (MarchSetting setting : settings.marchSettings) {
+            if (!marchAssigned[setting.marchNumber]) {
+                // This march needs to be started
+                MarchInfo availableQueue = findAvailableQueue(currentQueues);
+                if (availableQueue != null) {
+                    System.out.println("  🚀 Start March " + setting.marchNumber + ": " + 
+                                     setting.resourceType + " Lv." + setting.level + 
+                                     " on Queue " + availableQueue.queueNumber);
+                } else {
+                    System.out.println("  ⏳ March " + setting.marchNumber + ": " + 
+                                     setting.resourceType + " Lv." + setting.level + 
+                                     " (waiting for available queue)");
+                }
             }
         }
         
-        // Default fallback based on queue number
-        if (queueNumber <= 2) {
-            return new MarchInfo(queueNumber, MarchStatus.IDLE);
-        } else if (queueNumber == 3) {
-            return new MarchInfo(queueNumber, MarchStatus.UNLOCK);
-        } else {
-            return new MarchInfo(queueNumber, MarchStatus.CANNOT_USE);
-        }
+        System.out.println();
     }
     
     /**
-     * Check if text contains any of the given keywords (fuzzy matching)
+     * Find the first available (IDLE) queue
      */
-    private static boolean containsFuzzy(String text, String... keywords) {
-        for (String keyword : keywords) {
-            if (text.contains(keyword)) {
-                return true;
+    private static MarchInfo findAvailableQueue(List<MarchInfo> queues) {
+        for (MarchInfo queue : queues) {
+            if (queue.status == MarchStatus.IDLE) {
+                return queue;
             }
         }
-        return false;
+        return null;
     }
     
     /**
-     * Extract resource type from OCR text with fuzzy matching
+     * Create example auto gather settings for testing
      */
-    private static String extractResourceType(String text) {
-        if (containsFuzzy(text, "lumberyard", "lamberyar", "lumber", "wood")) {
-            return "Lumberyard";
-        } else if (containsFuzzy(text, "stone", "quarry")) {
-            return "Stone Quarry";
-        } else if (containsFuzzy(text, "gold", "mine")) {
-            return "Gold Mine";
-        } else if (containsFuzzy(text, "food", "farm")) {
-            return "Farm";
+    public static AutoGatherSettings createExampleSettings() {
+        AutoGatherSettings settings = new AutoGatherSettings();
+        settings.numberOfMarches = 3;
+        settings.marchSettings.clear();
+        settings.marchSettings.add(new MarchSetting(1, "Food", 2));
+        settings.marchSettings.add(new MarchSetting(2, "Iron", 1));
+        settings.marchSettings.add(new MarchSetting(3, "Wood", 3));
+        return settings;
+    }
+    
+    /**
+     * Read march queue statuses and analyze gathering needs
+     */
+    public static List<MarchInfo> readMarchQueuesWithAnalysis(int instanceIndex, AutoGatherSettings settings) {
+        List<MarchInfo> queues = readMarchQueues(instanceIndex);
+        
+        if (!queues.isEmpty() && settings != null) {
+            System.out.println("═══════════════════════════════════════");
+            analyzeGatheringNeeds(queues, settings);
+            System.out.println("═══════════════════════════════════════");
         }
-        return "Resource";
+        
+        return queues;
     }
     
     /**
